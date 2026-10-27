@@ -797,6 +797,10 @@ def _build_discriminated_union_meta(*, union: type, meta_annotations: tuple[Any,
 
     mapping: dict[str, type] = {}
     discriminator_alias: str | None = None
+    # When deferred Pydantic builds are still running on another thread,
+    # _extract_field_schema_pv2 can miss a variant. Caching that incomplete
+    # map permanently mis-routes later events (see #4036).
+    mapping_incomplete = False
 
     for variant in get_args(union):
         variant = strip_annotated_type(variant)
@@ -816,6 +820,15 @@ def _build_discriminated_union_meta(*, union: type, meta_annotations: tuple[Any,
             else:
                 field = _extract_field_schema_pv2(variant, discriminator_field_name)
                 if not field:
+                    rebuild = getattr(variant, "model_rebuild", None)
+                    if callable(rebuild):
+                        try:
+                            rebuild()
+                        except Exception:
+                            pass
+                        field = _extract_field_schema_pv2(variant, discriminator_field_name)
+                if not field:
+                    mapping_incomplete = True
                     continue
 
                 # Note: if one variant defines an alias then they all should
@@ -836,6 +849,9 @@ def _build_discriminated_union_meta(*, union: type, meta_annotations: tuple[Any,
         discriminator_field=discriminator_field_name,
         discriminator_alias=discriminator_alias,
     )
+    if mapping_incomplete:
+        # Return a best-effort map for this call, but do not poison the cache.
+        return details
     try:
         DISCRIMINATOR_CACHE.setdefault(union, details)
     except TypeError:

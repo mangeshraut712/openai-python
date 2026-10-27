@@ -915,6 +915,50 @@ def test_discriminated_unions_invalid_data_uses_cache() -> None:
     assert DISCRIMINATOR_CACHE.get(UnionType) is discriminator
 
 
+@pytest.mark.skipif(PYDANTIC_V1, reason="Deferred schema extraction is a Pydantic v2 concern")
+def test_discriminated_unions_does_not_cache_incomplete_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    class A(BaseModel):
+        type: Literal["a"]
+
+        data: str
+
+    class B(BaseModel):
+        type: Literal["b"]
+
+        data: int
+
+    UnionType = cast(Any, Union[A, B])
+    annotated = cast(Any, Annotated[UnionType, PropertyInfo(discriminator="type")])
+
+    import openai._models as models_mod
+
+    real_extract = models_mod._extract_field_schema_pv2
+    deny_b = {"active": True}
+
+    def fake_extract(model: type[BaseModel], field_name: str) -> object:
+        if deny_b["active"] and model is B:
+            return None
+        return real_extract(model, field_name)
+
+    monkeypatch.setattr(models_mod, "_extract_field_schema_pv2", fake_extract)
+
+    # While B's schema looks unavailable the incomplete map may mis-route this
+    # call, but it must not be cached — otherwise later calls stay wrong.
+    first = construct_type(value={"type": "b", "data": "foo"}, type_=annotated)
+    assert DISCRIMINATOR_CACHE.get(UnionType) is None
+    # Incomplete map typically routes type=b onto the first variant.
+    assert isinstance(first, A)
+
+    deny_b["active"] = False
+    second = construct_type(value={"type": "b", "data": "foo"}, type_=annotated)
+    assert isinstance(second, B)
+    assert second.type == "b"
+    assert second.data == "foo"  # type: ignore[comparison-overlap]
+    discriminator = DISCRIMINATOR_CACHE.get(UnionType)
+    assert discriminator is not None
+    assert set(discriminator.mapping) == {"a", "b"}
+
+
 @pytest.mark.skipif(PYDANTIC_V1, reason="TypeAliasType is not supported in Pydantic v1")
 def test_type_alias_type() -> None:
     Alias = TypeAliasType("Alias", str)  # pyright: ignore
